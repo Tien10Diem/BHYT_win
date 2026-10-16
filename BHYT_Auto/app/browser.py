@@ -53,6 +53,28 @@ class Browser:
         self.last_ocr_status = ''
         self.data_error = ''
 
+    def reset_tab(self):
+        """Mở tab mới sạch sẽ, xóa session cookies bị nghẽn và đóng tab cũ."""
+        try:
+            self.driver.delete_all_cookies()
+        except Exception:
+            pass
+        try:
+            old_tab = self.driver.current_window_handle
+            self.driver.switch_to.new_window('tab')
+            new_tab = self.driver.current_window_handle
+            try:
+                self.driver.switch_to.window(old_tab)
+                self.driver.close()
+            except Exception:
+                pass
+            self.driver.switch_to.window(new_tab)
+        except Exception:
+            try:
+                self.driver.get(URL)
+            except Exception:
+                pass
+
     def _find_captcha_image(self):
         """Tìm element ảnh CAPTCHA (id=imgCaptcha)."""
         try:
@@ -63,41 +85,111 @@ class Browser:
             pass
         return None
 
-    def _wait_captcha_loaded(self, timeout=10):
-        """Đợi cho đến khi ảnh CAPTCHA thực sự xuất hiện và nạp xong (naturalWidth > 30)."""
+    def _check_image_state(self, img=None):
+        """
+        Kiểm tra trạng thái ảnh CAPTCHA tức thì:
+        - 'ready': Đã nạp thành công, kích thước chuẩn (> 30px).
+        - 'broken': Đã nạp xong nhưng bị lỗi/vỡ icon/0 bytes (complete == true, naturalWidth <= 30).
+        - 'loading': Đang tải từ máy chủ về (!complete).
+        - 'not_found': Chưa tìm thấy element.
+        """
+        try:
+            if img is None:
+                img = self._find_captcha_image()
+            if not img:
+                return 'not_found'
+            return self.driver.execute_script("""
+                var img = arguments[0];
+                if (!img) return 'not_found';
+                if (!img.complete) return 'loading';
+                if (img.naturalWidth > 30 && img.naturalHeight > 10) return 'ready';
+                return 'broken';
+            """, img)
+        except Exception:
+            return 'not_found'
+
+    def _is_image_ready(self, img=None):
+        """Kiểm tra ảnh CAPTCHA có thực sự hiển thị đầy đủ."""
+        return self._check_image_state(img) == 'ready'
+
+    def _force_reload_captcha(self):
+        """Kích hoạt đổi ảnh CAPTCHA trực tiếp bằng timestamp mới nhất để tải ảnh mới ngay lập tức."""
+        try:
+            self.driver.execute_script("""
+                var img = document.getElementById('imgCaptcha');
+                if (img) {
+                    img.src = '/UserControls/CaptchaImageHandler.ashx?t=' + new Date().getTime();
+                }
+            """)
+        except Exception:
+            try:
+                self.driver.find_element(By.ID, 'imgCaptcha').click()
+            except Exception:
+                pass
+
+    def _get_captcha_src(self):
+        """Lấy URL hiện tại của ảnh CAPTCHA để theo dõi khi nào ảnh đổi."""
+        try:
+            return self.driver.execute_script(
+                "var img = document.getElementById('imgCaptcha'); return img ? img.src : '';")
+        except Exception:
+            return ''
+
+    def _wait_captcha_loaded(self, timeout=2.5):
+        """
+        Đợi cho đến khi ảnh CAPTCHA nạp xong chuẩn (> 30px).
+        Nếu phát hiện ảnh vỡ ('broken'), ép nạp lại ngay lập tức.
+        Nếu bị lỗi 2 lần liên tiếp, xóa cookies session bị nghẽn để tạo phiên mới ngay!
+        """
         deadline = monotonic() + timeout
+        broken_count = 0
         while monotonic() < deadline:
             img = self._find_captcha_image()
             if img:
-                try:
-                    loaded = self.driver.execute_script(
-                        "var img = arguments[0]; "
-                        "return img && img.complete && img.naturalWidth > 30 && img.naturalHeight > 10;",
-                        img
-                    )
-                    if loaded:
-                        return img
-                except Exception:
-                    pass
-            sleep(0.3)
+                state = self._check_image_state(img)
+                if state == 'ready':
+                    return img
+                elif state == 'broken':
+                    broken_count += 1
+                    if broken_count >= 2:
+                        try:
+                            self.driver.delete_all_cookies()
+                            self.driver.get(URL)
+                        except Exception:
+                            pass
+                        broken_count = 0
+                    else:
+                        self._force_reload_captcha()
+                    sleep(0.12)
+                    continue
+            sleep(0.08)
+        return self._find_captcha_image()
 
-        # Nếu sau timeout vẫn chưa hiện, bấm đổi mã và đợi tiếp
-        try:
-            self.driver.execute_script("$('#imgCaptcha').trigger('click');")
-        except Exception:
-            pass
-
-        deadline2 = monotonic() + 4
-        while monotonic() < deadline2:
+    def _wait_new_captcha(self, old_src=None, timeout=1.5):
+        """
+        Đợi ảnh CAPTCHA mới nạp xong sau khi tra cứu.
+        Nếu sau 0.5s mà ảnh chưa đổi hoặc bị vỡ, ép đổi ảnh ngay lập tức.
+        """
+        deadline = monotonic() + timeout
+        forced = False
+        while monotonic() < deadline:
             img = self._find_captcha_image()
             if img:
-                try:
-                    if self.driver.execute_script("return arguments[0].complete && arguments[0].naturalWidth > 30;", img):
+                state = self._check_image_state(img)
+                if state == 'ready':
+                    curr_src = self._get_captcha_src()
+                    if old_src is None or (curr_src and curr_src != old_src):
                         return img
-                except Exception:
-                    pass
-            sleep(0.3)
-        return None
+                elif state == 'broken':
+                    self._force_reload_captcha()
+                    forced = True
+                    sleep(0.12)
+                    continue
+            if not forced and (deadline - monotonic() < timeout - 0.5):
+                self._force_reload_captcha()
+                forced = True
+            sleep(0.08)
+        return self._find_captcha_image()
 
     def _find_captcha_input(self):
         """Tìm ô nhập mã CAPTCHA (id=tokenRecaptch)."""
@@ -119,29 +211,27 @@ class Browser:
             pass
         return None
 
-    def solve_and_submit_full(self, max_retries=6):
+    def solve_and_submit_full(self, max_retries=4, row=None):
         """
-        Tự động giải CAPTCHA và TỰ ĐỘNG THỬ LẠI KHI SAI:
-        - Đợi ảnh CAPTCHA nạp xong 100%
-        - OCR -> Điền -> Kích hoạt Tra cứu
-        - Nếu CAPTCHA sai: ĐỢI ẢNH MỚI NẠP XONG HOÀN TOÀN -> OCR lại -> Thử lại tối đa max_retries lần
-        - Trả về tuple (status, payload):
-            * ('SUCCESS', tcContainer_html_or_text)
-            * ('DATA_ERROR', error_message_from_server)
-            * ('CAPTCHA_FAILED', reason)
+        Tự động giải CAPTCHA và thử lại khi sai:
+        - Đồng bộ cả 4 trường dữ liệu (mã thẻ, họ tên, ngày sinh, captcha) trước khi gửi
+        - Đảm bảo 100% lệnh Tra cứu được phát đi (có fallback $.post nếu click bị nuốt)
+        - Tốc độ polling siêu nhanh (0.08s) để nhận kết quả trong tích tắc
         """
-        for attempt in range(1, max_retries + 1):
-            # 1. Đợi ảnh CAPTCHA xuất hiện rõ ràng
-            img = self._wait_captcha_loaded(timeout=8)
-            if not img:
-                self.last_ocr_status = f'Lần {attempt}: Đang chờ ảnh CAPTCHA hiển thị...'
-                try:
-                    self.driver.execute_script("$('#imgCaptcha').trigger('click');")
-                except Exception:
-                    pass
-                sleep(1.5)
-                img = self._wait_captcha_loaded(timeout=6)
+        if row is None:
+            row = getattr(self, 'current_row', {})
 
+        ma_the = str(row.get('Mã thẻ', '')).strip() if row else ''
+        ho_ten = str(row.get('Họ tên', '')).strip() if row else ''
+        ngay_sinh = str(row.get('Ngày sinh', '')).strip() if row else ''
+
+        for attempt in range(1, max_retries + 1):
+            # 1. Đợi ảnh CAPTCHA sẵn sàng
+            img = self._wait_captcha_loaded(timeout=2.0)
+            if not img or self._check_image_state(img) != 'ready':
+                self._force_reload_captcha()
+                sleep(0.2)
+                img = self._wait_captcha_loaded(timeout=2.0)
             if not img:
                 continue
 
@@ -155,80 +245,132 @@ class Browser:
                 text = ''
 
             if not text or len(text) < 4:
-                # Ảnh chưa rõ chữ -> đổi mã khác và đợi ảnh mới
-                try:
-                    self.driver.execute_script("$('#imgCaptcha').trigger('click');")
-                except Exception:
-                    pass
-                sleep(1.5)
+                self._force_reload_captcha()
+                sleep(0.15)
                 continue
 
             self.last_ocr_text = text
-            self.last_ocr_status = f'Lần {attempt}: OCR "{text}" ➔ Đang kích hoạt Tra cứu...'
+            self.last_ocr_status = f'Lần {attempt}: OCR "{text}" ➔ Tra cứu...'
 
-            # 3. Điền mã CAPTCHA vào ô (cả JS lẫn send_keys)
-            token_inp = self._find_captcha_input()
-            if token_inp:
-                try:
-                    token_inp.clear()
-                    token_inp.send_keys(text)
-                except Exception:
-                    pass
-            try:
-                self.driver.execute_script("$('#tokenRecaptch').val(arguments[0]);", text)
-            except Exception:
-                pass
+            current_captcha_src = self._get_captcha_src()
 
-            # 4. Kích hoạt nút Tra cứu duy nhất 1 lần bằng jQuery
+            # 3. Điền thông tin + mã CAPTCHA + Kích hoạt Tra cứu (bảo đảm 100% không bị nuốt lệnh)
             try:
                 self.driver.execute_script("""
-                    window.__bhytWatch = {seq: (window.__bhytWatch ? window.__bhytWatch.seq + 1 : 1)};
+                    var text = arguments[0];
+                    var maThe = arguments[1];
+                    var hoTen = arguments[2];
+                    var ngaySinh = arguments[3];
+
+                    // Luôn bảo đảm cả 3 trường dữ liệu không bị trống
+                    if (maThe) { $('#txtMaThe').val(maThe); var e1 = document.getElementById('txtMaThe'); if (e1) e1.value = maThe; }
+                    if (hoTen) { $('#txtHoTen').val(hoTen); var e2 = document.getElementById('txtHoTen'); if (e2) e2.value = hoTen; }
+                    if (ngaySinh) { $('#txtNgaySinh').val(ngaySinh); var e3 = document.getElementById('txtNgaySinh'); if (e3) e3.value = ngaySinh; }
+
+                    // Điền mã CAPTCHA
+                    var inp = document.getElementById('tokenRecaptch');
+                    if (inp) {
+                        inp.value = text;
+                        try { inp.dispatchEvent(new Event('input', {bubbles:true})); } catch(e) {}
+                        try { inp.dispatchEvent(new Event('change', {bubbles:true})); } catch(e) {}
+                    }
+                    try { $('#tokenRecaptch').val(text); } catch(e) {}
                     $('#tcContainer').html('');
                     $('#messeger').html('');
-                    $('#btnTraCuu').click();
-                """)
+
+                    // Kích hoạt Tra cứu qua sự kiện jQuery và click
+                    var btn = document.getElementById('btnTraCuu');
+                    if (btn) {
+                        try { $(btn).trigger('click'); } catch(e) {}
+                        try { btn.click(); } catch(e) {}
+                    } else {
+                        try { $('#btnTraCuu').trigger('click'); } catch(e) {}
+                    }
+
+                    // Nếu sự kiện click bị nuốt (jQuery.active vẫn = 0), gọi trực tiếp $.post của web để chống đứng hình
+                    if (window.jQuery && jQuery.active === 0) {
+                        $.post("/UserControls/BHXH/BaoHiemYTe/TheBHYT/pListTheBHYTThe.aspx", {
+                            "txtMaThe": $('#txtMaThe').val(),
+                            "tokenRecaptch": $('#tokenRecaptch').val(),
+                            "txtHoTen": $('#txtHoTen').val(),
+                            "txtNgaySinh": $('#txtNgaySinh').val()
+                        }, function (data) {
+                            try {
+                                $('#imgCaptcha').trigger('click');
+                                if (data.Error) {
+                                    $("#messeger").html(data.Title);
+                                } else {
+                                    $("#tcContainer").html(data);
+                                }
+                            } catch (err) {
+                                $("#tcContainer").html(data);
+                            }
+                        });
+                    }
+                """, text, ma_the, ho_ten, ngay_sinh)
             except Exception:
                 pass
 
-            # 5. Chờ phản hồi từ máy chủ (tối đa 6.0 giây, kiểm tra mỗi 0.25s)
+            # 4. Polling phản hồi từ máy chủ - chu kỳ 0.08s siêu nhạy (hạn chót 2.5s)
             state = 'WAITING'
-            for _ in range(24):
-                sleep(0.25)
+            deadline = monotonic() + 2.5
+            ajax_started = False
+
+            while monotonic() < deadline:
+                sleep(0.08)
                 try:
                     res = self.driver.execute_script("""
                         var tc = ($('#tcContainer').text() || '').trim();
                         var msg = ($('#messeger').text() || '').trim();
                         var dialog = ($('#dialog-message').text() || '').trim();
-                        var redEl = document.querySelector('#tcContainer span[style*="red"], #tcContainer .hoten, #tcContainer fieldset span');
+                        var redEl = document.querySelector('#tcContainer span[style*="red"], #messeger span[style*="red"]');
                         var redMsg = redEl ? redEl.innerText.trim() : '';
-                        return {
-                            tc: tc,
-                            msg: msg,
-                            dialog: dialog,
-                            redMsg: redMsg
-                        };
+                        var aj = (window.jQuery && jQuery.active > 0) ? true : false;
+                        return {tc:tc, msg:msg, dialog:dialog, redMsg:redMsg, aj:aj};
                     """)
                 except Exception:
                     res = {}
+
+                is_ajax = res.get('aj', False)
+                if is_ajax:
+                    ajax_started = True
 
                 tc = res.get('tc', '')
                 msg = res.get('msg', '')
                 dialog = res.get('dialog', '')
                 redMsg = res.get('redMsg', '')
 
-                # 1. THÀNH CÔNG: Có kết quả tra cứu trong tcContainer
-                if any(p in norm(tc) for p in ['thẻ bhyt còn giá trị sử dụng!', 'thẻ bhyt hết hạn!', 'chưa có thông tin thẻ bhyt']):
-                    self.last_ocr_status = f'OCR thành công: "{text}"!'
-                    return ('SUCCESS', tc)
+                norm_tc = norm(tc)
+                norm_msg = norm(msg)
+                norm_dialog = norm(dialog)
+                combined = f"{norm_tc} {norm_msg} {norm_dialog}"
 
-                # 2. LỖI DỮ LIỆU ĐỎ TRONG TCCONTAINER (Sai ngày sinh, họ tên, mã thẻ...)
+                if not ajax_started and not tc and not msg and not dialog and not redMsg:
+                    continue
+
+                # THÀNH CÔNG hoặc có kết quả rõ ràng (Không có thông tin, Bộ Quốc Phòng, Còn hạn, Hết hạn...)
+                if any(p in combined for p in [
+                    'thẻ bhyt còn giá trị sử dụng',
+                    'thẻ bhyt hết hạn',
+                    'chưa có thông tin',
+                    'không có thông tin',
+                    'không tìm thấy thông tin',
+                    'chưa có dữ liệu',
+                    'không tìm thấy dữ liệu',
+                    'bộ quốc phòng',
+                    'quốc phòng'
+                ]):
+                    self.last_ocr_status = f'OCR thành công: "{text}"!'
+                    return ('SUCCESS', tc or dialog or msg)
+
+                # LỖI DỮ LIỆU (chữ đỏ)
                 if redMsg and not any(k in norm(redMsg) for k in ['mã xác nhận', 'mã xác thực', 'sai mã']):
                     clean_err = redMsg.split('.')[0].strip() or redMsg
                     self.data_error = clean_err
                     self.last_ocr_status = f'Lỗi thông tin: {clean_err}'
                     return ('DATA_ERROR', clean_err)
 
-                # 3. LỖI DỮ LIỆU TỪ HỘP THOẠI DIALOG HOẶC #MESSEGER
+                # LỖI DỮ LIỆU từ dialog hoặc messeger
                 for err_text in [dialog, msg]:
                     if err_text and not any(k in norm(err_text) for k in ['mã xác nhận', 'mã xác thực', 'sai mã']):
                         clean_err = err_text.split('.')[0].strip() or err_text
@@ -236,76 +378,164 @@ class Browser:
                         self.last_ocr_status = f'Lỗi thông tin: {clean_err}'
                         return ('DATA_ERROR', clean_err)
 
-                # 4. LỖI DỮ LIỆU TRONG TEXT CỦA TCCONTAINER (Dạng văn bản thông báo)
-                norm_tc = norm(tc)
+                # LỖI DỮ LIỆU trong text tcContainer
                 for err_phrase in ['ngày sinh không đúng', 'ngày sinh không hợp lệ', 'họ tên không đúng',
                                    'họ tên không hợp lệ', 'mã số bhxh không đúng', 'mã thẻ không đúng',
                                    'không tìm thấy thông tin']:
                     if err_phrase in norm_tc:
                         clean_err = tc.split('.')[0].strip() or err_phrase
                         self.data_error = clean_err
-                        self.last_ocr_status = f'Lỗi thông tin: {clean_err}'
+                        self.last_ocr_status = f'Lỗi: {clean_err}'
                         return ('DATA_ERROR', clean_err)
 
-                # 5. CAPTCHA SAI ➔ Bắt được lỗi mã xác nhận từ máy chủ
-                if any(k in norm(msg) or k in norm(dialog) or k in norm(redMsg) for k in ['mã xác nhận', 'mã xác thực', 'sai mã']):
+                # CAPTCHA SAI → server báo lỗi mã xác nhận
+                if any(k in combined or k in norm(redMsg) for k in ['mã xác nhận', 'mã xác thực', 'sai mã']):
                     state = 'CAPTCHA_WRONG'
                     break
 
-            # NẾU CAPTCHA SAI: ĐỢI ĐỦ THỜI GIAN ĐỂ ẢNH MỚI NẠP VỀ HOÀN TOÀN RỒI MỚI THỬ TIẾP!
+            # Xử lý CAPTCHA sai: Đợi ảnh mới nạp xong
             if state == 'CAPTCHA_WRONG':
-                self.last_ocr_status = f'Lần {attempt}: Mã "{text}" chưa đúng ➔ Chờ ảnh mới tải xong rồi thử lại...'
-                sleep(2.0)  # Đợi 2 giây để server BHXH sinh và load ảnh mới hoàn toàn
+                self.last_ocr_status = f'Lần {attempt}: Mã "{text}" sai ➔ Nạp ảnh mới...'
+                img = self._wait_new_captcha(old_src=current_captcha_src, timeout=1.5)
                 continue
 
-            # Nếu sau 6s mà web vẫn im lìm (lag mạng) ➔ Đổi ảnh mới, đợi 1.8s rồi thử lại
+            # Timeout không có phản hồi (> 2.5s): Yêu cầu bị kẹt trên máy chủ -> Hủy kết nối treo và thử lại ngay lập tức
             if attempt < max_retries:
+                self.last_ocr_status = f'Lần {attempt}: Máy chủ phản hồi chậm (>2.5s) ➔ Đổi mã & gửi lại ngay...'
                 try:
-                    self.driver.execute_script("$('#imgCaptcha').trigger('click');")
+                    self.driver.execute_script("try { window.stop(); } catch(e) {}")
                 except Exception:
                     pass
-                sleep(1.8)
+                self._force_reload_captcha()
+                sleep(0.15)
                 continue
 
-        reason = f'Không vượt được CAPTCHA sau {max_retries} lần thử'
+        reason = f'Chưa vượt được CAPTCHA sau {max_retries} lần thử'
         self.last_ocr_status = reason
-        return ('CAPTCHA_FAILED', reason)
+        return ('CAPTCHA_RETRY', reason)
 
-    def solve_and_submit(self, max_retries=6):
+    def solve_and_submit(self, max_retries=4):
         status, payload = self.solve_and_submit_full(max_retries=max_retries)
         return (self.last_ocr_text, status in ('SUCCESS', 'DATA_ERROR'))
 
-    def process_record(self, row, max_retries=6):
-        """Mở trang, điền thông tin và thực hiện giải CAPTCHA + tra cứu tự động."""
-        self.prepare(row, auto_ocr=False)
-        return self.solve_and_submit_full(max_retries=max_retries)
+    def process_record(self, row, max_attempts=3, max_retries=None):
+        """
+        Thực hiện tra cứu tự động cho 1 bản ghi:
+        - Mở trang, kiểm tra ảnh CAPTCHA nạp thành công rồi mới điền form.
+        - Tự động giải CAPTCHA (tối đa 4 lần thử nhanh trong cùng 1 tab).
+        - Nếu vẫn chưa qua thì mới làm mới phiên.
+        """
+        if max_retries is not None:
+            max_attempts = max_retries
 
-    def prepare(self, row, auto_ocr=True):
-        """Mở trang sạch, đợi ảnh CAPTCHA sẵn sàng, điền thông tin và tự động giải CAPTCHA."""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                force_tab = (attempt > 1)
+                if attempt == 1:
+                    self.prepare(row, auto_ocr=False)
+                else:
+                    self.prepare(row, auto_ocr=False, force_new_tab=True)
+
+                status, payload = self.solve_and_submit_full(max_retries=4, row=row)
+                if status in ('SUCCESS', 'DATA_ERROR'):
+                    return (status, payload)
+            except Exception as e:
+                self.last_ocr_status = f"Làm mới trang ({e})"
+                sleep(0.3)
+                try:
+                    self.reset_tab()
+                except Exception:
+                    pass
+
+        return ('CAPTCHA_RETRY', 'Chưa qua CAPTCHA sau các lần thử, tiếp tục làm lại')
+
+    def prepare(self, row, auto_ocr=True, force_new_tab=False):
+        """Mở trang sạch hoặc tái sử dụng trang hiện tại, đợi ảnh CAPTCHA sẵn sàng, điền thông tin và chuẩn bị giải."""
         self.ready = False
         self.data_error = ''
-        self.driver.get(URL)
+        self.current_row = row
 
-        # 1. ĐỢI CHO ĐẾN KHI ẢNH CAPTCHA HIỆN RÕ RÀNG TRƯỚC
-        img = self._wait_captcha_loaded(timeout=10)
-        if not img:
-            self.driver.execute_script("$('#imgCaptcha').trigger('click');")
-            sleep(1.5)
-            self._wait_captcha_loaded(timeout=6)
+        can_reuse = False
+        if not force_new_tab:
+            try:
+                curr = self.driver.current_url or ''
+                if 'baohiemxahoi.gov.vn' in curr:
+                    el = self.driver.find_element(By.ID, 'txtMaThe')
+                    if el.is_displayed():
+                        can_reuse = True
+            except Exception:
+                can_reuse = False
 
-        # 2. Sau khi ảnh đã sẵn sàng, điền thông tin
-        wait = WebDriverWait(self.driver, 15)
-        for field, hint, elem_id in [
-            ('Mã thẻ', 'mã số BHXH/thẻ BHYT', 'txtMaThe'),
-            ('Họ tên', 'họ tên', 'txtHoTen'),
-            ('Ngày sinh', '1950', 'txtNgaySinh')
-        ]:
-            xpath = f"//input[contains(@placeholder, '{hint}')]"
-            elements = wait.until(lambda d: [e for e in d.find_elements(By.XPATH, xpath) if e.is_displayed() and e.is_enabled()] or False)
-            if len(elements) != 1:
-                raise ValueError('Không xác định duy nhất ô ' + field)
-            elements[0].clear()
-            elements[0].send_keys(row[field])
+        if not can_reuse:
+            if force_new_tab:
+                self.reset_tab()
+            self.driver.get(URL)
+            img = self._wait_captcha_loaded(timeout=2.5)
+            if not img or self._check_image_state(img) != 'ready':
+                try:
+                    self.driver.delete_all_cookies()
+                    self.driver.get(URL)
+                    img = self._wait_captcha_loaded(timeout=2.5)
+                except Exception:
+                    pass
+            if not img or self._check_image_state(img) != 'ready':
+                raise RuntimeError('Ảnh CAPTCHA chưa tải được từ máy chủ BHXH. Đang thử lại...')
+        else:
+            # Tái sử dụng trang đã tải sẵn: dọn dẹp các khung kết quả cũ và ô captcha
+            try:
+                self.driver.execute_script("""
+                    $('#tcContainer').html('');
+                    $('#messeger').html('');
+                    var inp = document.getElementById('tokenRecaptch');
+                    if (inp) inp.value = '';
+                    try { $('#tokenRecaptch').val(''); } catch(e) {}
+                """)
+            except Exception:
+                pass
+
+            # Đợi ảnh CAPTCHA mới sẵn sàng (thường đã được web tự tải ngầm sau khi submit)
+            img = self._wait_captcha_loaded(timeout=1.2)
+            if not img or self._check_image_state(img) != 'ready':
+                try:
+                    self.driver.execute_script("$('#imgCaptcha').trigger('click');")
+                    img = self._wait_captcha_loaded(timeout=1.5)
+                except Exception:
+                    pass
+
+            if not img or self._check_image_state(img) != 'ready':
+                # Nếu không thể tải captcha trên trang cũ thì mới tải lại trang
+                self.driver.get(URL)
+                img = self._wait_captcha_loaded(timeout=2.5)
+                if not img or self._check_image_state(img) != 'ready':
+                    raise RuntimeError('Ảnh CAPTCHA chưa tải được từ máy chủ BHXH. Đang thử lại...')
+
+        # 2. Sau khi ảnh đã sẵn sàng 100%, điền thông tin trực tiếp bằng ID và JavaScript
+        ma_the = str(row.get('Mã thẻ', '')).strip()
+        ho_ten = str(row.get('Họ tên', '')).strip()
+        ngay_sinh = str(row.get('Ngày sinh', '')).strip()
+
+        wait = WebDriverWait(self.driver, 5)
+        wait.until(lambda d: d.find_element(By.ID, 'txtMaThe').is_displayed() and d.find_element(By.ID, 'txtHoTen').is_displayed() and d.find_element(By.ID, 'txtNgaySinh').is_displayed())
+
+        self.driver.execute_script("""
+            var maThe = arguments[0];
+            var hoTen = arguments[1];
+            var ngaySinh = arguments[2];
+
+            function setVal(id, val) {
+                var el = document.getElementById(id);
+                if (el) {
+                    el.value = val;
+                    try { $(el).val(val).trigger('input').trigger('change'); } catch(e) {}
+                }
+            }
+
+            setVal('txtMaThe', maThe);
+            setVal('txtHoTen', hoTen);
+            setVal('txtNgaySinh', ngaySinh);
+            $('#tcContainer').html('');
+            $('#messeger').html('');
+        """, ma_the, ho_ten, ngay_sinh)
 
         self.baseline = self.driver.find_element(By.TAG_NAME, 'body').text
         self.row_token = uuid4().hex

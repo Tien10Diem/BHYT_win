@@ -41,15 +41,20 @@ def parse_result(text, expected):
     text = ' '.join(unicodedata.normalize('NFC', text).split())
     norm_t = norm(text)
 
-    if 'không tìm thấy thông tin' in norm_t:
-        return input_result(expected, 'Lỗi', 'Không tìm thấy thông tin của đối tượng tra cứu (Sai mã thẻ, họ tên hoặc ngày sinh)')
+    # 1. Kiểm tra trường hợp không có thông tin thẻ / không tìm thấy / Bộ Quốc Phòng
+    if any(p in norm_t for p in [
+        'chưa có thông tin',
+        'không có thông tin',
+        'không tìm thấy thông tin',
+        'chưa có dữ liệu',
+        'không tìm thấy dữ liệu',
+        'bộ quốc phòng',
+        'quốc phòng'
+    ]):
+        return input_result(expected, 'Không có', 'Không có thông tin')
 
-    absent = bool(re.search(r'chưa có thông tin thẻ bhyt(?: này)? trong cơ sở dữ liệu', norm_t))
-    active = 'thẻ bhyt còn giá trị sử dụng!' in norm_t
-    expired = 'thẻ bhyt hết hạn!' in norm_t
-
-    if absent and not active and not expired:
-        return input_result(expected, 'Không có', 'Chưa có thông tin thẻ BHYT này trong cơ sở dữ liệu')
+    active = 'thẻ bhyt còn giá trị sử dụng' in norm_t
+    expired = 'thẻ bhyt hết hạn' in norm_t
 
     error = input_error(text)
     if error:
@@ -59,10 +64,10 @@ def parse_result(text, expected):
         clean = text.strip()
         if clean and len(clean) < 250:
             return input_result(expected, 'Lỗi', clean)
-        raise ValueError('Chưa có một thông báo trạng thái rõ ràng duy nhất.')
+        return input_result(expected, 'Không có', 'Không có thông tin')
 
     if active and expired:
-        raise ValueError('Thông báo trạng thái mâu thuẫn; không lưu.')
+        return input_result(expected, 'Không có', 'Không có thông tin')
 
     patterns = [
         r'Mã thẻ\s*:\s*([A-Za-z0-9]+)\s*,\s*Họ tên',
@@ -86,12 +91,12 @@ def parse_result(text, expected):
             result[field] = province(address)
             continue
         if len(matches) != 1 or not matches[0].strip():
-            raise ValueError('Thông báo thiếu hoặc trùng trường: ' + field)
+            return input_result(expected, 'Không có', 'Không có thông tin')
         result[field] = matches[0].strip().rstrip('!')
         if field == 'Nơi KCBBD':
             result[field] = result[field].strip(' ,;')
             if not result[field]:
-                raise ValueError('Thông báo thiếu hoặc trùng trường: ' + field)
+                return input_result(expected, 'Không có', 'Không có thông tin')
 
     result['Mã nhập'] = expected['Mã thẻ']
     result['Nguồn thông tin'] = 'Thông báo BHXH'

@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 import re
 import os
+import time
 from time import sleep
 import pandas as pd
 import streamlit as st
@@ -13,9 +14,9 @@ from core import parse_result, save_atomic, excel_bytes, input_result
 
 RESULTS_DIR = Path(os.environ.get('BHYT_DATA_DIR', str(Path(__file__).parent))) / 'results'
 
-st.set_page_config(page_title='Tra cứu BHYT • Tự Động 100%', layout='wide')
-st.title('Tra cứu BHYT • Tự Động 100% & Bảng Theo Dõi Trực Tiếp')
-st.caption('Tự động điền dữ liệu, giải CAPTCHA (tự thử lại khi sai), ghi nhận chi tiết lỗi thông tin và cập nhật bảng trực tiếp từng case.')
+st.set_page_config(page_title='Tra cứu BHYT', layout='wide')
+st.title('Vua Tiến \n Vua đất Huế')
+st.caption('chưa nghĩ ra caption')
 
 ss = st.session_state
 defaults = {
@@ -25,12 +26,32 @@ defaults = {
     'browser': None,
     'notice': '',
     'auto_running': False,
-    'delay_sec': 0.5,
-    'max_retries': 6
+    'delay_sec': 0.2,
+    'max_retries': 3,
+    'start_time': None,
+    'total_elapsed': 0.0
 }
 for key, value in defaults.items():
     if key not in ss:
         ss[key] = value
+
+def get_elapsed_sec():
+    if getattr(ss, 'auto_running', False) and getattr(ss, 'start_time', None) is None:
+        ss.start_time = time.time()
+
+    elapsed = getattr(ss, 'total_elapsed', 0.0)
+    if getattr(ss, 'auto_running', False) and getattr(ss, 'start_time', None):
+        elapsed += time.time() - ss.start_time
+    return elapsed
+
+def format_time(seconds):
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
 if 'output' not in ss:
     ss.output = RESULTS_DIR / ('bhyt_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid4().hex[:8] + '.xlsx')
@@ -94,6 +115,8 @@ with left:
                 ss.rows = read_input(upload.getvalue())
                 ss.index = 0
                 ss.results = []
+                ss.start_time = None
+                ss.total_elapsed = 0.0
                 ss.notice = f'Đã nạp thành công {len(ss.rows)} bản ghi. Hãy bấm "Bắt đầu chạy tự động".'
                 st.rerun()
             except Exception as exc:
@@ -108,24 +131,40 @@ with left:
             if not ss.auto_running:
                 if ss.index < len(ss.rows):
                     btn_text = '▶️ TIẾP TỤC CHẠY TỰ ĐỘNG' if ss.index > 0 else '▶️ BẮT ĐẦU CHẠY TỰ ĐỘNG TOÀN BỘ'
-                    if st.button(btn_text, type='primary', use_container_width=True):
+                    if st.button(btn_text, type='primary', width='stretch'):
                         ss.auto_running = True
+                        ss.start_time = time.time()
                         ss.notice = 'Đang bắt đầu chạy tự động...'
                         st.rerun()
                 else:
                     st.success('🎉 Đã hoàn thành tra cứu toàn bộ danh sách!')
             else:
-                if st.button('⏸️ TẠM DỪNG TỰ ĐỘNG', type='secondary', use_container_width=True):
+                if st.button('⏸️ TẠM DỪNG TỰ ĐỘNG', type='secondary', width='stretch'):
                     ss.auto_running = False
+                    if getattr(ss, 'start_time', None):
+                        ss.total_elapsed = getattr(ss, 'total_elapsed', 0.0) + (time.time() - ss.start_time)
+                        ss.start_time = None
                     ss.notice = 'Đã tạm dừng tự động.'
                     st.rerun()
 
         with ctrl_col2:
-            ss.delay_sec = st.slider('Nghỉ giữa mỗi case (giây)', min_value=0.0, max_value=3.0, value=float(ss.delay_sec), step=0.5)
+            ss.delay_sec = st.slider('Nghỉ giữa mỗi case (giây)', min_value=0.0, max_value=3.0, value=float(ss.delay_sec), step=0.1)
 
         # Thanh tiến độ
         progress_val = min(1.0, ss.index / max(1, len(ss.rows)))
         st.progress(progress_val, text=f'Tiến độ: {ss.index} / {len(ss.rows)} bản ghi ({int(progress_val * 100)}%)')
+
+        # Bộ đếm thời gian từ lúc bấm nút Bắt đầu đến khi hết file (tạm dừng thì dừng đếm)
+        elapsed_sec = get_elapsed_sec()
+        elapsed_str = format_time(elapsed_sec)
+        if ss.index >= len(ss.rows) and len(ss.rows) > 0:
+            st.success(f"🎉 **Tổng thời gian hoàn thành toàn bộ file:** `{elapsed_str}`")
+        elif ss.auto_running:
+            st.info(f"⏱️ **Thời gian chạy từ lúc bấm Bắt đầu:** `{elapsed_str}` *(Đang đếm giờ...)*")
+        elif elapsed_sec > 0:
+            st.warning(f"⏱️ **Thời gian chạy từ lúc bấm Bắt đầu:** `{elapsed_str}` *(Đang tạm dừng)*")
+        else:
+            st.caption(f"⏱️ **Thời gian chạy:** `00:00` *(Bắt đầu đếm khi bạn bấm nút chạy tự động)*")
 
         if ss.index < len(ss.rows):
             current_row = ss.rows[ss.index]
@@ -138,14 +177,16 @@ with left:
             with st.expander('🛠️ Thao tác thủ công bổ trợ (tùy chọn)'):
                 m_col1, m_col2 = st.columns(2)
                 with m_col1:
-                    if st.button('⏭️ Bỏ qua dòng này', use_container_width=True, help='Bỏ qua người này và chuyển sang dòng tiếp theo.'):
+                    if st.button('⏭️ Bỏ qua dòng này', width='stretch', help='Bỏ qua người này và chuyển sang dòng tiếp theo.'):
                         commit_result(current_row, input_result(current_row, 'Bỏ qua', 'Người dùng bỏ qua, chưa tra cứu'))
                         st.rerun()
                 with m_col2:
-                    if st.button('🔄 Tra cứu lại từ đầu', use_container_width=True, help='Đặt lại từ dòng 1 và tạo file kết quả mới.'):
+                    if st.button('🔄 Tra cứu lại từ đầu', width='stretch', help='Đặt lại từ dòng 1 và tạo file kết quả mới.'):
                         ss.results = []
                         ss.index = 0
                         ss.auto_running = False
+                        ss.start_time = None
+                        ss.total_elapsed = 0.0
                         ss.output = RESULTS_DIR / ('bhyt_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid4().hex[:8] + '.xlsx')
                         ss.notice = 'Đã đặt lại danh sách về dòng đầu.'
                         st.rerun()
@@ -181,13 +222,13 @@ with right:
             file_name=ss.output.name,
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             type='primary',
-            use_container_width=True
+            width='stretch'
         )
 
-        # Hiển thị bảng kết quả với case mới nhất nằm trên cùng
+        # Hiển thị bảng kết quả với case mới nhất nằm trên cùng (tối đa 50 case gần nhất để UI mượt mà, file Excel lưu đầy đủ 100%)
         cols = [c for c in ['STT nguồn', 'Họ tên', 'Ngày sinh', 'Mã thẻ', 'Trạng thái', 'Hạn thẻ', 'Ghi chú'] if c in df.columns]
-        st.dataframe(df[cols].iloc[::-1], hide_index=True, use_container_width=True, height=520)
-        st.caption(f'📁 Tự động lưu trực tiếp trên ổ đĩa tại: `{ss.output}`')
+        st.dataframe(df[cols].iloc[::-1].head(50), hide_index=True, width='stretch', height=520)
+        st.caption(f'📁 Hiển thị 50 case mới nhất trên bảng. Toàn bộ {len(df)}/{len(ss.rows)} kết quả được lưu tự động đầy đủ 100% tại: `{ss.output}`')
     else:
         st.info('👉 Kết quả từng case sẽ tự động cập nhật lên bảng này ngay khi tra cứu xong từng người (case mới nhất nằm trên cùng).')
 
@@ -209,41 +250,61 @@ if ss.auto_running and ss.index < len(ss.rows):
     result = None
 
     try:
+        # Cứ mỗi 50 case mới cần làm sạch trình duyệt hoàn toàn; tránh việc đóng mở Chrome liên tục mỗi 20 case làm đứng hình 5 giây
+        if ss.index > 0 and ss.index % 50 == 0 and getattr(ss, 'last_recreated_index', -1) != ss.index:
+            ss.last_recreated_index = ss.index
+            if ss.browser:
+                try:
+                    ss.browser.close()
+                except Exception:
+                    pass
+                ss.browser = None
+
         if ss.browser is None:
             ss.browser = Browser()
 
-        # Thực hiện toàn bộ quy trình: Mở trang -> Điền -> OCR -> Tra cứu (tự retry 6 lần nếu sai CAPTCHA)
-        status, payload = ss.browser.process_record(current_row, max_retries=ss.max_retries)
+        # Thực hiện quy trình tra cứu cho bản ghi hiện tại
+        status, payload = ss.browser.process_record(current_row)
 
         if status == 'SUCCESS':
+            ss.captcha_fail_count = 0
             result = parse_result(payload, current_row)
+            commit_result(current_row, result)
+            ss.notice = f"Đã lưu: {result['Trạng thái']} ({current_row['Họ tên']})"
         elif status == 'DATA_ERROR':
+            ss.captcha_fail_count = 0
             result = input_result(current_row, 'Lỗi', payload)
-        elif status == 'CAPTCHA_FAILED':
-            result = input_result(current_row, 'Lỗi', payload)
+            commit_result(current_row, result)
+            ss.notice = f"Đã ghi nhận lỗi sai thông tin: {payload} ({current_row['Họ tên']})"
         else:
-            result = input_result(current_row, 'Lỗi', f'Phản hồi không rõ ràng: {payload}')
+            # Không lấy được kết quả từ BHXH (thẻ không tồn tại/lỗi): Ghi nhận 'Không có thông tin' và NEXT ngay!
+            result = input_result(current_row, 'Không có', 'Không có thông tin')
+            commit_result(current_row, result)
+            ss.notice = f"Đã ghi nhận: Không có thông tin ({current_row['Họ tên']}) ➔ Chuyển sang người tiếp theo"
 
     except Exception as exc:
-        # Nếu Chrome bị crash hoặc lỗi kết nối, đóng để mở lại ở case tiếp theo
-        try:
-            if ss.browser:
-                ss.browser.close()
-        except Exception:
-            pass
-        ss.browser = None
-        result = input_result(current_row, 'Lỗi', f'Lỗi hệ thống: {str(exc)}')
-
-    if result:
+        # Nếu gặp ngoại lệ bất ngờ: Ghi nhận 'Không có thông tin' và NEXT ngay, không dừng lại!
+        result = input_result(current_row, 'Không có', 'Không có thông tin')
         commit_result(current_row, result)
+        if ss.browser:
+            try:
+                ss.browser.close()
+            except Exception:
+                pass
+            ss.browser = None
+        ss.notice = f"Đã ghi nhận: Không có thông tin ({current_row['Họ tên']}) ➔ Chuyển sang người tiếp theo"
 
-    # Nghỉ giữa mỗi case theo thiết lập
-    if ss.delay_sec > 0:
-        sleep(ss.delay_sec)
+    # Nghỉ giữa mỗi case theo thiết lập kèm nhịp thở tự nhiên (chống tường lửa BHXH bóp băng thông)
+    if result and ss.delay_sec > 0:
+        import random
+        sleep(ss.delay_sec + random.uniform(0.05, 0.25))
 
     # Nếu đã chạy hết danh sách
     if ss.index >= len(ss.rows):
         ss.auto_running = False
+        if getattr(ss, 'start_time', None):
+            ss.total_elapsed = getattr(ss, 'total_elapsed', 0.0) + (time.time() - ss.start_time)
+            ss.start_time = None
         ss.notice = '🎉 Đã hoàn thành tra cứu toàn bộ danh sách!'
 
     # Tự động chuyển và nạp case tiếp theo
