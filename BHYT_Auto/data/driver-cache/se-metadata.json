@@ -2,10 +2,10 @@
   "browsers": [],
   "drivers": [
     {
-      "major_browser_version": "155",
+      "major_browser_version": "156",
       "driver_name": "chromedriver",
-      "driver_version": "155.0.8059.84",
-      "driver_ttl": 1792160865
+      "driver_version": "156.0.8078.73",
+      "driver_ttl": 1793276256
     }
   ],
   "stats": [
@@ -16,7 +16,7 @@
       "arch": "x86_64",
       "lang": "python",
       "selenium_version": "4.51",
-      "stats_ttl": 1792160864
+      "stats_ttl": 1793276255
     }
   ],
   "cached_assets": [
@@ -28,7 +28,12 @@
     {
       "asset_name": "chromedriver",
       "asset_version": "155.0.8059.84",
-      "last_used": 1792157642
+      "last_used": 1792159425
+    },
+    {
+      "asset_name": "chromedriver",
+      "asset_version": "156.0.8078.73",
+      "last_used": 1793272656
     }
   ]
 }
